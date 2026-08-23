@@ -1,0 +1,34 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test
+      - run: cargo build --release
+      - name: Checksum
+        shell: pwsh
+        run: |
+          $h = (Get-FileHash target/release/mousebatt.exe -Algorithm SHA256).Hash.ToLower()
+          "$h  mousebatt.exe" | Out-File -Encoding ascii target/release/mousebatt.exe.sha256
+          "SHA256=$h" >> $env:GITHUB_ENV
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/release/mousebatt.exe
+            target/release/mousebatt.exe.sha256
+          body: |
+            `mousebatt.exe` SHA-256: `${{ env.SHA256 }}`
+
+            See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details.
+            Unsigned binary: SmartScreen will prompt on first run (More info → Run anyway).

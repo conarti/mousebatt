@@ -3,6 +3,13 @@ name = "mousebatt"
 version = "0.1.0"
 edition = "2021"
 description = "Tray battery monitor for Pulsar and VAXEE wireless mice"
+license = "MIT"
+repository = "https://github.com/ryanlewis/mousebatt"
+readme = "README.md"
+keywords = ["windows", "tray", "battery", "hid", "mouse"]
+categories = ["hardware-support", "os::windows-apis"]
+rust-version = "1.80"
+publish = false
 
 [dependencies.windows-sys]
 version = "0.59"

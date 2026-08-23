@@ -3,6 +3,8 @@
 A tiny Windows system-tray battery monitor for Pulsar and VAXEE wireless gaming mice.
 The current battery percentage is drawn directly onto the tray icon.
 
+![Tray icon showing 90% with tooltip "Pulsar 8K Dongle Gen.2 — 90% · 4.07 V"](docs/tray.png)
+
 - ~300 KB single exe, no runtime, no installer
 - Zero CPU while idle — event-driven Win32, no polling threads
 - Pure Rust; the only dependency is [`windows-sys`](https://crates.io/crates/windows-sys) (no hidapi, no GUI framework)
@@ -28,9 +30,18 @@ since devices are matched by vendor ID + HID usage page rather than specific pro
 If the mouse is asleep and doesn't answer, the last known value is shown in gray and
 marked stale in the tooltip — it recovers on the next poll.
 
+## Installing
+
+Grab `mousebatt.exe` from the [latest release](https://github.com/ryanlewis/mousebatt/releases/latest)
+and run it — there is nothing to install. Use **Start with Windows** in the right-click menu
+to have it launch at logon.
+
+The exe is not code-signed, so SmartScreen will warn the first time you run it
+(**More info → Run anyway**). Each release lists the SHA-256 of the binary if you want to verify it.
+
 ## Building
 
-Requires the Rust toolchain with the MSVC target.
+Requires the Rust toolchain (1.80 or newer) with the MSVC target.
 
 ```
 cargo build --release
@@ -57,3 +68,29 @@ The vendor protocols were reverse-engineered by the community:
   (17-byte report `08 04 … 49`; battery %, charging flag, and voltage in the reply),
   also documented via [jonkristian/pulsar-x3-python](https://github.com/jonkristian/pulsar-x3-python)
 - VAXEE: feature-report protocol documented in [stuffz/mouse-battery-monitor](https://github.com/stuffz/mouse-battery-monitor)
+
+## Privacy
+
+mousebatt makes no network connections and collects nothing. It only opens HID
+interfaces whose vendor ID is Pulsar or VAXEE, sends the vendor's battery query,
+and reads the reply. The "Start with Windows" toggle writes one value under
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
+
+## Adding a mouse
+
+Devices are matched by vendor ID and HID usage page in `src/protocol.rs`
+(`read_battery`), and the two vendor protocols live in the same file as pure
+functions with unit tests. To add support for another mouse:
+
+1. Find its VID/PID and the vendor-specific usage page (Device Manager → Details →
+   *Hardware Ids*, or any HID enumeration tool).
+2. Work out the battery request/response — the linked projects below and the Linux
+   `hid-*` drivers are the best starting points.
+3. Add a `parse_*` function with a test using a captured reply, and a branch in `read_battery`.
+
+Issues and PRs for other Pulsar/VAXEE models (or other vendors) are welcome; please
+include the product string from the tooltip and, ideally, a captured report.
+
+## License
+
+[MIT](LICENSE).

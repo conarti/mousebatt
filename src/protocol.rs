@@ -31,15 +31,34 @@ pub fn read_battery() -> ReadResult {
         .iter()
         .find(|d| d.vid == PULSAR_VID && d.usage_page == 0xff02)
     {
-        return pulsar_read(info);
+        return pulsar_read(&with_vendor("Pulsar", info));
     }
     if let Some(info) = devices
         .iter()
         .find(|d| d.vid == VAXEE_VID && d.usage_page == 0xff05)
     {
-        return vaxee_read(info);
+        return vaxee_read(&with_vendor("VAXEE", info));
     }
     ReadResult::NoDevice
+}
+
+/// The HID product string is often just the receiver name ("8K Dongle Gen.2"),
+/// so prefix the vendor for the tooltip unless it already names it.
+fn with_vendor(vendor: &str, info: &HidDeviceInfo) -> HidDeviceInfo {
+    let product = if info
+        .product
+        .to_ascii_lowercase()
+        .contains(&vendor.to_ascii_lowercase())
+    {
+        info.product.clone()
+    } else {
+        format!("{vendor} {}", info.product)
+    };
+    HidDeviceInfo {
+        product,
+        path: info.path.clone(),
+        ..*info
+    }
 }
 
 fn pulsar_read(info: &HidDeviceInfo) -> ReadResult {
