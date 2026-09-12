@@ -3,7 +3,7 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.2.0] - 2026-09-12
 
 ### Added
 - **Polling rate** submenu in the right-click menu; the current rate is checked and also
@@ -22,5 +22,5 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follo
 - "Start with Windows" toggle in the right-click menu
 - Single ~290 KB exe with no dependencies beyond `windows-sys`
 
-[Unreleased]: https://github.com/ryanlewis/mousebatt/compare/v0.1.0...HEAD
+[0.2.0]: https://github.com/ryanlewis/mousebatt/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ryanlewis/mousebatt/releases/tag/v0.1.0
