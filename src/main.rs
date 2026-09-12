@@ -16,7 +16,7 @@ use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 
 use icon::Hicon;
-use protocol::{read_battery, set_pulsar_polling, BatteryStatus, ReadResult, PULSAR_RATES};
+use protocol::{read_battery, set_polling, BatteryStatus, ReadResult};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Registry::{
@@ -46,7 +46,7 @@ const TIMER_DEBOUNCE: usize = 2;
 const MENU_REFRESH: usize = 1;
 const MENU_AUTOSTART: usize = 2;
 const MENU_EXIT: usize = 3;
-/// Polling-rate items are `MENU_RATE_BASE + index into PULSAR_RATES`.
+/// Polling-rate items are `MENU_RATE_BASE + index into PollingInfo::rates`.
 const MENU_RATE_BASE: usize = 100;
 
 // Not re-exported cleanly by windows-sys; values are stable Win32 ABI.
@@ -199,7 +199,7 @@ fn start_poll(hwnd: HWND) {
         let hz = REQUESTED_HZ.swap(0, Ordering::SeqCst);
         if hz != 0 {
             // Success shows up as the moved check mark after the re-read.
-            set_pulsar_polling(hz);
+            set_polling(hz);
         }
         let result = Box::into_raw(Box::new(read_battery()));
         // SAFETY: on success, ownership of `result` passes to the message queue
@@ -332,11 +332,11 @@ fn show_menu(hwnd: HWND) {
     let cmd = unsafe {
         let menu = CreatePopupMenu();
         AppendMenuW(menu, MF_STRING, MENU_REFRESH, wide("Refresh now").as_ptr());
-        // Only mice whose protocol exposes the rate (Pulsar) get the submenu;
-        // it lists what the current link (cable or dongle) can do.
+        // Only shown once the mouse has reported its rate; lists what the
+        // current link (cable or dongle) can do.
         if let Some(p) = polling {
             let sub = CreatePopupMenu();
-            for (i, &hz) in PULSAR_RATES.iter().enumerate() {
+            for (i, &hz) in p.rates.iter().enumerate() {
                 if hz > p.max_hz {
                     break;
                 }
@@ -384,7 +384,7 @@ fn show_menu(hwnd: HWND) {
         id => {
             if let Some(&hz) = id
                 .checked_sub(MENU_RATE_BASE)
-                .and_then(|i| PULSAR_RATES.get(i))
+                .and_then(|i| polling?.rates.get(i))
             {
                 REQUESTED_HZ.store(hz, Ordering::SeqCst);
                 start_poll(hwnd);
@@ -490,6 +490,7 @@ mod tests {
             s.polling = Some(protocol::PollingInfo {
                 hz: 4000,
                 max_hz: 8000,
+                rates: &protocol::PULSAR_RATES,
             });
         }
         assert_eq!(tray_view(&r, None).tip, "X3 — 85% · 3.91 V · 4000 Hz");

@@ -6,9 +6,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follo
 ## [Unreleased]
 
 ### Added
-- **Polling rate** submenu in the right-click menu for Pulsar mice: pick 125 Hz–8 kHz
-  (only rates the current link supports are listed — 1 kHz max on cable, up to 8 kHz on
-  the 8K dongle); the current rate is checked and also shown in the tooltip
+- **Polling rate** submenu in the right-click menu; the current rate is checked and also
+  shown in the tooltip. Only rates the current link supports are listed:
+  - Pulsar: 125 Hz–8 kHz (1 kHz max on cable, up to 8 kHz on the 8K dongle)
+  - VAXEE: 500 Hz–4 kHz on the VXD02 4K dongle (8 kHz on the 8K receiver), 1 kHz max on
+    cable or in a "Standard" tracking mode, matching the VAXEE Control Center
 
 ## [0.1.0] - 2026-08-23
 

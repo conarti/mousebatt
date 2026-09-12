@@ -13,10 +13,14 @@
 //!   Register map from packerlschupfer/pulsar-mouse-linux; verified on an
 //!   X3 LHD CrazyLight (wired and 8K Dongle Gen.2).
 //!
-//! VAXEE (4K dongle; from stuffz/mouse-battery-monitor):
-//!   64-byte FEATURE reports, report ID 0x0E, header 0xA5.
-//!   cmd 0x0B -> resp[5]*5 = battery %, cmd 0x10 -> resp[5]!=0 = charging.
-//!   Response valid when resp[2] echoes non-zero.
+//! VAXEE (4K dongle; battery from stuffz/mouse-battery-monitor, the rest from
+//! the VAXEE Control Center web driver at vcc.vaxee.co):
+//!   64-byte FEATURE reports `0E A5 <cmd> <rw> <len> <data…>`, rw 1 = read,
+//!   2 = write. The reply echoes the cmd (non-zero = valid) with data at [5..].
+//!     cmd 0x0B -> resp[5]*5 = battery %, cmd 0x10 -> resp[5]!=0 = charging.
+//!     cmd 0x07 -> resp[5] = polling-rate index 1..5 = 500/1000/2000/4000/8000.
+//!     cmd 0x08 -> resp[5] = tracking mode; "Standard" modes cap the rate at 1 kHz.
+//!   Verified on an XE-S-L behind a VXD02 4K dongle (PID 0x2001).
 use crate::hid::{enumerate, HidDevice, HidDeviceInfo, PULSAR_VID, VAXEE_VID};
 use std::time::{Duration, Instant};
 
@@ -25,16 +29,19 @@ pub struct BatteryStatus {
     pub charging: bool,
     pub voltage_mv: Option<u16>,
     pub product: String,
-    /// Polling-rate state, for mice whose protocol exposes it (Pulsar).
+    /// Polling-rate state; `None` if the mouse didn't answer that part.
     pub polling: Option<PollingInfo>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PollingInfo {
-    /// Rate stored in the active profile.
+    /// Rate the mouse is currently set to.
     pub hz: u16,
-    /// Highest rate the current link (cable or dongle) supports.
+    /// Highest rate the current link (cable, dongle, tracking mode) supports.
     pub max_hz: u16,
+    /// Every rate this vendor's protocol can encode, ascending; the menu
+    /// offers those up to `max_hz`.
+    pub rates: &'static [u16],
 }
 
 pub enum ReadResult {
@@ -46,29 +53,49 @@ pub enum ReadResult {
 
 /// Every polling rate the Pulsar protocol can encode, ascending.
 pub const PULSAR_RATES: [u16; 7] = [125, 250, 500, 1000, 2000, 4000, 8000];
+/// Every polling rate the VAXEE protocol can encode, ascending (index 1..5).
+pub const VAXEE_RATES: [u16; 5] = [500, 1000, 2000, 4000, 8000];
 
 pub fn read_battery() -> ReadResult {
     let devices = enumerate();
     if let Some(info) = find_pulsar(&devices) {
         return pulsar_read(&with_vendor("Pulsar", info));
     }
-    if let Some(info) = devices
-        .iter()
-        .find(|d| d.vid == VAXEE_VID && d.usage_page == 0xff05)
-    {
+    if let Some(info) = find_vaxee(&devices) {
         return vaxee_read(&with_vendor("VAXEE", info));
     }
     ReadResult::NoDevice
 }
 
-/// Write `hz` into the active profile of the connected Pulsar mouse.
-/// Returns `true` once the mouse has echoed the write back.
-pub fn set_pulsar_polling(hz: u16) -> bool {
-    let Some(code) = pulsar_rate_code(hz) else {
-        return false;
-    };
+/// Write `hz` to whichever supported mouse is connected (same priority as
+/// `read_battery`). Returns `true` once the mouse has acknowledged the write;
+/// the caller re-reads afterwards, so this is only a hint.
+pub fn set_polling(hz: u16) -> bool {
     let devices = enumerate();
-    let Some(info) = find_pulsar(&devices) else {
+    if let Some(info) = find_pulsar(&devices) {
+        return set_pulsar_polling(info, hz);
+    }
+    if let Some(info) = find_vaxee(&devices) {
+        return set_vaxee_polling(info, hz);
+    }
+    false
+}
+
+fn find_pulsar(devices: &[HidDeviceInfo]) -> Option<&HidDeviceInfo> {
+    devices
+        .iter()
+        .find(|d| d.vid == PULSAR_VID && d.usage_page == 0xff02)
+}
+
+fn find_vaxee(devices: &[HidDeviceInfo]) -> Option<&HidDeviceInfo> {
+    devices
+        .iter()
+        .find(|d| d.vid == VAXEE_VID && d.usage_page == 0xff05)
+}
+
+/// Write `hz` into the active profile of a Pulsar mouse.
+fn set_pulsar_polling(info: &HidDeviceInfo, hz: u16) -> bool {
+    let Some(code) = pulsar_rate_code(hz) else {
         return false;
     };
     let Some(dev) = HidDevice::open(info) else {
@@ -81,10 +108,23 @@ pub fn set_pulsar_polling(hz: u16) -> bool {
     (0..2).any(|_| pulsar_xact(&dev, &req).is_some_and(|resp| pulsar_set_acked(&req, &resp)))
 }
 
-fn find_pulsar(devices: &[HidDeviceInfo]) -> Option<&HidDeviceInfo> {
-    devices
-        .iter()
-        .find(|d| d.vid == PULSAR_VID && d.usage_page == 0xff02)
+/// Write `hz` to a VAXEE mouse. The link renegotiates after a rate change and
+/// ignores requests for ~300 ms, so give it that before the caller re-reads.
+fn set_vaxee_polling(info: &HidDeviceInfo, hz: u16) -> bool {
+    let Some(index) = vaxee_rate_index(hz) else {
+        return false;
+    };
+    let Some(dev) = HidDevice::open(info) else {
+        return false;
+    };
+    let acked = (0..2).any(|_| {
+        vaxee_xact(&dev, &vaxee_write_request(VAXEE_CMD_RATE, &[index]))
+            .is_some_and(|resp| vaxee_write_acked(&resp, VAXEE_CMD_RATE))
+    });
+    if acked {
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    acked
 }
 
 /// The HID product string is often just the receiver name ("8K Dongle Gen.2"),
@@ -149,27 +189,41 @@ fn pulsar_polling(dev: &HidDevice) -> Option<PollingInfo> {
     let max_hz = parse_pulsar_link_max(&info)?;
     let mem = pulsar_xact(dev, &pulsar_mem_get(PULSAR_ADDR_POLLING, 2))?;
     let hz = parse_pulsar_polling(&mem)?;
-    Some(PollingInfo { hz, max_hz })
+    Some(PollingInfo {
+        hz,
+        max_hz,
+        rates: &PULSAR_RATES,
+    })
 }
 
 fn vaxee_read(info: &HidDeviceInfo) -> ReadResult {
     let Some(dev) = HidDevice::open(info) else {
         return ReadResult::NoResponse(info.product.clone());
     };
-    let query = |cmd: u8| -> Option<Vec<u8>> {
-        if !dev.set_feature(&vaxee_request(cmd)) {
-            return None;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        vaxee_valid(dev.get_feature(0x0e)?)
-    };
+    let query = |cmd: u8| vaxee_xact(&dev, &vaxee_request(cmd));
     for _ in 0..2 {
         if let (Some(bat), Some(chg)) = (query(VAXEE_CMD_BATTERY), query(VAXEE_CMD_CHARGING)) {
-            return ReadResult::Ok(parse_vaxee(&bat, &chg, &info.product));
+            let mut status = parse_vaxee(&bat, &chg, &info.product);
+            // Best effort: the tray still works without it.
+            status.polling = query(VAXEE_CMD_RATE).and_then(|rate| {
+                let tracking = query(VAXEE_CMD_TRACKING)?;
+                parse_vaxee_polling(&rate, &tracking, info.pid)
+            });
+            return ReadResult::Ok(status);
         }
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        std::thread::sleep(Duration::from_millis(300));
     }
     ReadResult::NoResponse(info.product.clone())
+}
+
+/// Send one VAXEE feature request and fetch the reply the mouse leaves in the
+/// feature buffer ~100 ms later (the web driver's timing).
+fn vaxee_xact(dev: &HidDevice, req: &[u8]) -> Option<Vec<u8>> {
+    if !dev.set_feature(req) {
+        return None;
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    vaxee_valid(dev.get_feature(VAXEE_REPORT_ID)?)
 }
 
 // ---------------------------------------------------------------------------
@@ -184,8 +238,17 @@ const PULSAR_CMD_MEM_GET: u8 = 0x08;
 const PULSAR_MAGIC: u8 = 0x55;
 const PULSAR_ADDR_POLLING: u16 = 0x0000;
 
+const VAXEE_REPORT_ID: u8 = 0x0e;
+const VAXEE_HEADER: u8 = 0xa5;
+const VAXEE_READ: u8 = 0x01;
+const VAXEE_WRITE: u8 = 0x02;
+const VAXEE_CMD_RATE: u8 = 0x07;
+const VAXEE_CMD_TRACKING: u8 = 0x08;
 const VAXEE_CMD_BATTERY: u8 = 0x0b;
 const VAXEE_CMD_CHARGING: u8 = 0x10;
+/// Receiver PIDs (the web driver's `DefWireless`); anything else on the
+/// vendor page is the mouse itself on a cable.
+const VAXEE_DONGLE_PIDS: [u16; 4] = [0x1001, 0x1002, 0x2001, 0x2002];
 
 /// Build a 17-byte Pulsar frame: report ID, command, `body` from byte 2, and
 /// the checksum in byte 16.
@@ -292,7 +355,20 @@ fn parse_pulsar(resp: &[u8], product: &str) -> Option<BatteryStatus> {
 
 /// 5-byte VAXEE feature request: report ID, header, cmd, read, length.
 fn vaxee_request(cmd: u8) -> [u8; 5] {
-    [0x0e, 0xa5, cmd, 0x01, 0x01]
+    [VAXEE_REPORT_ID, VAXEE_HEADER, cmd, VAXEE_READ, 0x01]
+}
+
+/// VAXEE write request: report ID, header, cmd, write, length, data.
+fn vaxee_write_request(cmd: u8, data: &[u8]) -> Vec<u8> {
+    let mut req = vec![
+        VAXEE_REPORT_ID,
+        VAXEE_HEADER,
+        cmd,
+        VAXEE_WRITE,
+        data.len() as u8,
+    ];
+    req.extend_from_slice(data);
+    req
 }
 
 /// A VAXEE reply is valid only when the mouse echoed a non-zero cmd byte.
@@ -301,6 +377,55 @@ fn vaxee_valid(resp: Vec<u8>) -> Option<Vec<u8>> {
         return None;
     }
     Some(resp)
+}
+
+/// A write is acknowledged as `A5 <cmd> 03 01 01` (captured: `0e a5 07 03 01 01`).
+fn vaxee_write_acked(resp: &[u8], cmd: u8) -> bool {
+    resp.len() >= 6 && resp[1] == VAXEE_HEADER && resp[2] == cmd && resp[3] == 0x03 && resp[5] == 1
+}
+
+/// Polling-rate index for cmd 0x07: 1..5 = 500/1000/2000/4000/8000.
+fn vaxee_rate_index(hz: u16) -> Option<u8> {
+    VAXEE_RATES
+        .iter()
+        .position(|&r| r == hz)
+        .map(|i| i as u8 + 1)
+}
+
+fn vaxee_index_rate(index: u8) -> Option<u16> {
+    VAXEE_RATES.get(index.checked_sub(1)? as usize).copied()
+}
+
+/// Current rate and ceiling from validated rate (0x07) and tracking (0x08)
+/// replies plus the USB product ID.
+///
+/// Ceiling rules mirror the web driver: a mouse on its cable, or a "Standard"
+/// tracking mode (mode 2/4 in the 1-byte encoding, mode 0 in the 2-byte one),
+/// gets 1 kHz; otherwise the receiver decides (VXD02 4K = 4 kHz, 8K = 8 kHz).
+fn parse_vaxee_polling(rate: &[u8], tracking: &[u8], pid: u16) -> Option<PollingInfo> {
+    if rate[2] != VAXEE_CMD_RATE || tracking[2] != VAXEE_CMD_TRACKING {
+        return None;
+    }
+    let hz = vaxee_index_rate(rate[5])?;
+    let standard = match tracking[4] {
+        2 => tracking[5] == 0,
+        _ => tracking[5] == 2 || tracking[5] == 4,
+    };
+    let max_hz = if !VAXEE_DONGLE_PIDS.contains(&pid) || standard {
+        1000
+    } else if pid == 0x2002 {
+        8000
+    } else if pid == 0x1001 {
+        1000
+    } else {
+        4000
+    };
+    Some(PollingInfo {
+        hz,
+        // Never hide the rate the mouse is actually on.
+        max_hz: max_hz.max(hz),
+        rates: &VAXEE_RATES,
+    })
 }
 
 /// Combine validated battery and charging replies.
@@ -510,6 +635,94 @@ mod tests {
         assert_eq!(
             parse_vaxee(&vaxee_reply(0x0b, 25), &vaxee_reply(0x10, 0), "V").percent,
             100
+        );
+    }
+
+    #[test]
+    fn vaxee_write_frame_and_ack() {
+        // Captured: `0e a5 07 02 01 02` -> `0e a5 07 03 01 01`.
+        assert_eq!(
+            vaxee_write_request(0x07, &[2]),
+            [0x0e, 0xa5, 0x07, 0x02, 0x01, 0x02]
+        );
+        let ack = [0x0e, 0xa5, 0x07, 0x03, 0x01, 0x01, 0, 0];
+        assert!(vaxee_write_acked(&ack, 0x07));
+        assert!(!vaxee_write_acked(&ack, 0x08));
+        let mut nak = ack;
+        nak[5] = 0;
+        assert!(!vaxee_write_acked(&nak, 0x07));
+        assert!(!vaxee_write_acked(&ack[..5], 0x07));
+        // A stale read reply for the same cmd is not an ack.
+        assert!(!vaxee_write_acked(&vaxee_reply(0x07, 3), 0x07));
+    }
+
+    #[test]
+    fn vaxee_rate_indexes_round_trip() {
+        for hz in VAXEE_RATES {
+            assert_eq!(vaxee_index_rate(vaxee_rate_index(hz).unwrap()), Some(hz));
+        }
+        assert_eq!(vaxee_rate_index(500), Some(1));
+        assert_eq!(vaxee_rate_index(2000), Some(3));
+        assert_eq!(vaxee_rate_index(125), None);
+        assert_eq!(vaxee_index_rate(0), None);
+        assert_eq!(vaxee_index_rate(6), None);
+    }
+
+    fn tracking_reply(len: u8, mode: u8) -> Vec<u8> {
+        let mut r = vaxee_reply(0x08, mode);
+        r[4] = len;
+        r
+    }
+
+    #[test]
+    fn vaxee_polling_on_4k_dongle() {
+        // Captured: rate `0e a5 07 01 01 03`, tracking `0e a5 08 01 01 01`, PID 0x2001.
+        let p = parse_vaxee_polling(&vaxee_reply(0x07, 3), &tracking_reply(1, 1), 0x2001).unwrap();
+        assert_eq!((p.hz, p.max_hz), (2000, 4000));
+        assert_eq!(p.rates, &VAXEE_RATES);
+        // Motion-sync-on gaming mode is still gaming.
+        let p = parse_vaxee_polling(&vaxee_reply(0x07, 4), &tracking_reply(1, 3), 0x2001).unwrap();
+        assert_eq!((p.hz, p.max_hz), (4000, 4000));
+    }
+
+    #[test]
+    fn vaxee_polling_ceilings() {
+        // Standard tracking caps at 1 kHz, in both encodings.
+        let p = parse_vaxee_polling(&vaxee_reply(0x07, 2), &tracking_reply(1, 2), 0x2001).unwrap();
+        assert_eq!(p.max_hz, 1000);
+        let p = parse_vaxee_polling(&vaxee_reply(0x07, 2), &tracking_reply(2, 0), 0x2002).unwrap();
+        assert_eq!(p.max_hz, 1000);
+        // 2-byte encoding, mode 1 = gaming, on the 8K receiver.
+        let p = parse_vaxee_polling(&vaxee_reply(0x07, 5), &tracking_reply(2, 1), 0x2002).unwrap();
+        assert_eq!((p.hz, p.max_hz), (8000, 8000));
+        // The 1K receiver and a mouse on its cable get 1 kHz.
+        assert_eq!(
+            parse_vaxee_polling(&vaxee_reply(0x07, 2), &tracking_reply(1, 1), 0x1001)
+                .unwrap()
+                .max_hz,
+            1000
+        );
+        assert_eq!(
+            parse_vaxee_polling(&vaxee_reply(0x07, 2), &tracking_reply(1, 1), 0x1008)
+                .unwrap()
+                .max_hz,
+            1000
+        );
+        // The current rate is never hidden by the ceiling.
+        let p = parse_vaxee_polling(&vaxee_reply(0x07, 4), &tracking_reply(1, 2), 0x2001).unwrap();
+        assert_eq!((p.hz, p.max_hz), (4000, 4000));
+    }
+
+    #[test]
+    fn vaxee_polling_rejects_bad_replies() {
+        assert!(
+            parse_vaxee_polling(&vaxee_reply(0x07, 9), &tracking_reply(1, 1), 0x2001).is_none()
+        );
+        assert!(
+            parse_vaxee_polling(&vaxee_reply(0x0b, 3), &tracking_reply(1, 1), 0x2001).is_none()
+        );
+        assert!(
+            parse_vaxee_polling(&vaxee_reply(0x07, 3), &vaxee_reply(0x0b, 1), 0x2001).is_none()
         );
     }
 }
