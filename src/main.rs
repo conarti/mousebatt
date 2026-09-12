@@ -13,10 +13,10 @@ mod protocol;
 use std::cell::RefCell;
 use std::mem::zeroed;
 use std::ptr::{null, null_mut};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 
 use icon::Hicon;
-use protocol::{read_battery, BatteryStatus, ReadResult};
+use protocol::{read_battery, set_polling, BatteryStatus, ReadResult};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Registry::{
@@ -31,7 +31,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DispatchMessageW,
     GetCursorPos, GetMessageW, KillTimer, PostMessageW, PostQuitMessage, RegisterClassW,
     RegisterWindowMessageW, SetForegroundWindow, SetTimer, TrackPopupMenu, TranslateMessage,
-    CW_USEDEFAULT, MF_CHECKED, MF_SEPARATOR, MF_STRING, MSG, TPM_NONOTIFY, TPM_RETURNCMD,
+    CW_USEDEFAULT, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, TPM_NONOTIFY, TPM_RETURNCMD,
     TPM_RIGHTBUTTON, WM_APP, WM_CREATE, WM_DESTROY, WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER,
     WNDCLASSW, WS_OVERLAPPED,
 };
@@ -46,6 +46,8 @@ const TIMER_DEBOUNCE: usize = 2;
 const MENU_REFRESH: usize = 1;
 const MENU_AUTOSTART: usize = 2;
 const MENU_EXIT: usize = 3;
+/// Polling-rate items are `MENU_RATE_BASE + index into PollingInfo::rates`.
+const MENU_RATE_BASE: usize = 100;
 
 // Not re-exported cleanly by windows-sys; values are stable Win32 ABI.
 const WM_DEVICECHANGE: u32 = 0x0219;
@@ -55,6 +57,9 @@ const PBT_APMRESUMEAUTOMATIC: usize = 0x0012;
 
 static POLLING: AtomicBool = AtomicBool::new(false);
 static TASKBAR_CREATED_MSG: AtomicU32 = AtomicU32::new(0);
+/// Polling rate the user picked from the menu, applied by the next poll
+/// thread before it reads the battery (0 = nothing pending).
+static REQUESTED_HZ: AtomicU16 = AtomicU16::new(0);
 
 // Main-thread UI state.
 thread_local! {
@@ -191,6 +196,11 @@ fn start_poll(hwnd: HWND) {
     }
     let hwnd_addr = hwnd as usize;
     std::thread::spawn(move || {
+        let hz = REQUESTED_HZ.swap(0, Ordering::SeqCst);
+        if hz != 0 {
+            // Success shows up as the moved check mark after the re-read.
+            set_polling(hz);
+        }
         let result = Box::into_raw(Box::new(read_battery()));
         // SAFETY: on success, ownership of `result` passes to the message queue
         // and `wndproc` reclaims it. PostMessageW only reads its arguments.
@@ -215,6 +225,10 @@ fn on_poll_done(hwnd: HWND, result: ReadResult) {
         // can't be shown with this one's percentage.
         ReadResult::NoDevice => LAST_GOOD.with(|g| *g.borrow_mut() = None),
         ReadResult::NoResponse(_) => {}
+    }
+    // A rate picked while this poll was in flight is still waiting.
+    if REQUESTED_HZ.load(Ordering::SeqCst) != 0 {
+        start_poll(hwnd);
     }
 }
 
@@ -241,6 +255,9 @@ fn tray_view(result: &ReadResult, last_pct: Option<u8>) -> TrayView {
             }
             if let Some(mv) = s.voltage_mv {
                 tip.push_str(&format!(" · {:.2} V", mv as f32 / 1000.0));
+            }
+            if let Some(p) = s.polling {
+                tip.push_str(&format!(" · {} Hz", p.hz));
             }
             TrayView {
                 text: s.percent.to_string(),
@@ -307,13 +324,32 @@ fn remove_tray(hwnd: HWND) {
 
 fn show_menu(hwnd: HWND) {
     let autostart = autostart_enabled();
+    let polling = LAST_GOOD.with(|g| g.borrow().as_ref().and_then(|s| s.polling));
     let mut pt = POINT { x: 0, y: 0 };
-    // SAFETY: the menu is created and destroyed within this block; every
-    // string temporary lives for the full statement that passes it; `pt` is
-    // a valid out-pointer.
+    // SAFETY: the menu (and the submenu it owns) is created and destroyed
+    // within this block; every string temporary lives for the full statement
+    // that passes it; `pt` is a valid out-pointer.
     let cmd = unsafe {
         let menu = CreatePopupMenu();
         AppendMenuW(menu, MF_STRING, MENU_REFRESH, wide("Refresh now").as_ptr());
+        // Only shown once the mouse has reported its rate; lists what the
+        // current link (cable or dongle) can do.
+        if let Some(p) = polling {
+            let sub = CreatePopupMenu();
+            for (i, &hz) in p.rates.iter().enumerate() {
+                if hz > p.max_hz {
+                    break;
+                }
+                AppendMenuW(
+                    sub,
+                    MF_STRING | if hz == p.hz { MF_CHECKED } else { 0 },
+                    MENU_RATE_BASE + i,
+                    wide(&format!("{hz} Hz")).as_ptr(),
+                );
+            }
+            // DestroyMenu(menu) below also destroys the attached submenu.
+            AppendMenuW(menu, MF_POPUP, sub as usize, wide("Polling rate").as_ptr());
+        }
         AppendMenuW(
             menu,
             MF_STRING | if autostart { MF_CHECKED } else { 0 },
@@ -345,7 +381,15 @@ fn show_menu(hwnd: HWND) {
             // SAFETY: no preconditions.
             unsafe { PostQuitMessage(0) };
         }
-        _ => {}
+        id => {
+            if let Some(&hz) = id
+                .checked_sub(MENU_RATE_BASE)
+                .and_then(|i| polling?.rates.get(i))
+            {
+                REQUESTED_HZ.store(hz, Ordering::SeqCst);
+                start_poll(hwnd);
+            }
+        }
     }
 }
 
@@ -435,7 +479,21 @@ mod tests {
             charging,
             voltage_mv: mv,
             product: "X3".into(),
+            polling: None,
         })
+    }
+
+    #[test]
+    fn ok_tip_includes_polling_rate() {
+        let mut r = status(85, false, Some(3912));
+        if let ReadResult::Ok(s) = &mut r {
+            s.polling = Some(protocol::PollingInfo {
+                hz: 4000,
+                max_hz: 8000,
+                rates: &protocol::PULSAR_RATES,
+            });
+        }
+        assert_eq!(tray_view(&r, None).tip, "X3 — 85% · 3.91 V · 4000 Hz");
     }
 
     #[test]

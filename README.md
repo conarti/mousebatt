@@ -24,8 +24,12 @@ since devices are matched by vendor ID + HID usage page rather than specific pro
 - Polls the mouse every 4 minutes over the vendor HID interface
 - Re-reads immediately when a USB device is plugged/unplugged (debounced) and on resume from sleep
 - Icon text color: white = normal, green = charging, red = ≤20%, gray = stale/no data
-- Tooltip shows model name, percentage, charging state, and battery voltage (Pulsar only)
-- Left-click = refresh now; right-click = menu with **Refresh**, **Start with Windows**, **Exit**
+- Tooltip shows model name, percentage, charging state, polling rate, and battery voltage (Pulsar only)
+- Left-click = refresh now; right-click = menu with **Refresh**, **Polling rate**, **Start with Windows**, **Exit**
+- **Polling rate** lists the rates the current link supports with the active one checked;
+  picking one writes it to the mouse, the same setting the vendor's web driver changes.
+  Pulsar: 125 Hz–1 kHz on cable, up to 8 kHz on the 8K dongle. VAXEE: 500 Hz–4 kHz on the
+  4K dongle (1 kHz max on cable or in a "Standard" tracking mode)
 
 If the mouse is asleep and doesn't answer, the last known value is shown in gray and
 marked stale in the tooltip — it recovers on the next poll.
@@ -66,14 +70,20 @@ The vendor protocols were reverse-engineered by the community:
 
 - Pulsar: same protocol as the Linux [`hid-kysona`](https://github.com/torvalds/linux/blob/master/drivers/hid/hid-kysona.c) driver
   (17-byte report `08 04 … 49`; battery %, charging flag, and voltage in the reply),
-  also documented via [jonkristian/pulsar-x3-python](https://github.com/jonkristian/pulsar-x3-python)
-- VAXEE: feature-report protocol documented in [stuffz/mouse-battery-monitor](https://github.com/stuffz/mouse-battery-monitor)
+  also documented via [jonkristian/pulsar-x3-python](https://github.com/jonkristian/pulsar-x3-python).
+  The settings register map (polling rate at address `0x0000`, link type from the
+  `0x01` info reply) comes from [packerlschupfer/pulsar-mouse-linux](https://github.com/packerlschupfer/pulsar-mouse-linux)
+  and [andrewrabert/python-pulsar-mouse-tool](https://github.com/andrewrabert/python-pulsar-mouse-tool)
+- VAXEE: feature-report protocol documented in [stuffz/mouse-battery-monitor](https://github.com/stuffz/mouse-battery-monitor);
+  the polling-rate (`0x07`) and tracking-mode (`0x08`) commands follow the
+  [VAXEE Control Center](https://vcc.vaxee.co/) web driver
 
 ## Privacy
 
 mousebatt makes no network connections and collects nothing. It only opens HID
 interfaces whose vendor ID is Pulsar or VAXEE, sends the vendor's battery query,
-and reads the reply. The "Start with Windows" toggle writes one value under
+and reads the reply. The only thing it ever writes to a mouse is the polling rate you
+pick from the menu. The "Start with Windows" toggle writes one value under
 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
 
 ## Adding a mouse
