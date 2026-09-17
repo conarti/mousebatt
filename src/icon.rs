@@ -61,7 +61,11 @@ pub enum BatteryGlyph {
 }
 
 impl BatteryGlyph {
-    pub const ALL: [BatteryGlyph; 3] = [BatteryGlyph::Hidden, BatteryGlyph::Above, BatteryGlyph::Below];
+    pub const ALL: [BatteryGlyph; 3] = [
+        BatteryGlyph::Hidden,
+        BatteryGlyph::Above,
+        BatteryGlyph::Below,
+    ];
 }
 
 /// Where things go in a `size`-px icon. At 16 px, with the glyph: 8 rows for
@@ -171,14 +175,24 @@ fn text_quality() -> u32 {
     let mut kind: u32 = 0;
     // SAFETY: each call writes a single BOOL / UINT into the pointed-to local.
     unsafe {
-        SystemParametersInfoW(SPI_GETFONTSMOOTHING, 0, &mut on as *mut i32 as *mut c_void, 0);
-        SystemParametersInfoW(SPI_GETFONTSMOOTHINGTYPE, 0, &mut kind as *mut u32 as *mut c_void, 0);
+        SystemParametersInfoW(
+            SPI_GETFONTSMOOTHING,
+            0,
+            &mut on as *mut i32 as *mut c_void,
+            0,
+        );
+        SystemParametersInfoW(
+            SPI_GETFONTSMOOTHINGTYPE,
+            0,
+            &mut kind as *mut u32 as *mut c_void,
+            0,
+        );
     }
-    // windows-sys types these inconsistently (u8 vs u32).
+    // windows-sys types these inconsistently: the ClearType one is already u32.
     if on == 0 {
         NONANTIALIASED_QUALITY as u32
     } else if kind == FE_FONTSMOOTHINGCLEARTYPE {
-        CLEARTYPE_NATURAL_QUALITY as u32
+        CLEARTYPE_NATURAL_QUALITY
     } else {
         ANTIALIASED_QUALITY as u32
     }
@@ -186,12 +200,20 @@ fn text_quality() -> u32 {
 
 /// `[r, g, b]` of a COLORREF (0x00BBGGRR).
 fn colorref_rgb(c: u32) -> [i32; 3] {
-    [(c & 0xFF) as i32, ((c >> 8) & 0xFF) as i32, ((c >> 16) & 0xFF) as i32]
+    [
+        (c & 0xFF) as i32,
+        ((c >> 8) & 0xFF) as i32,
+        ((c >> 16) & 0xFF) as i32,
+    ]
 }
 
 /// `[r, g, b]` of a DIB pixel (0x00RRGGBB).
 fn pixel_rgb(p: u32) -> [i32; 3] {
-    [((p >> 16) & 0xFF) as i32, ((p >> 8) & 0xFF) as i32, (p & 0xFF) as i32]
+    [
+        ((p >> 16) & 0xFF) as i32,
+        ((p >> 8) & 0xFF) as i32,
+        (p & 0xFF) as i32,
+    ]
 }
 
 /// A COLORREF as a DIB pixel.
@@ -689,23 +711,46 @@ mod tests {
         let lerp = |a: i32, b: i32, t: f32| (a as f32 + (b - a) as f32 * t).round() as i32;
         for fg in [[26, 26, 26], [196, 43, 28], [15, 123, 15], [112, 112, 112]] {
             // ClearType covers each channel separately.
-            for t in [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [0.5, 0.5, 0.5], [0.3, 0.6, 0.9], [0.9, 0.6, 0.3]] {
-                let drawn = [lerp(bg[0], fg[0], t[0]), lerp(bg[1], fg[1], t[1]), lerp(bg[2], fg[2], t[2])];
+            for t in [
+                [0.0, 0.0, 0.0],
+                [1.0, 1.0, 1.0],
+                [0.5, 0.5, 0.5],
+                [0.3, 0.6, 0.9],
+                [0.9, 0.6, 0.3],
+            ] {
+                let drawn = [
+                    lerp(bg[0], fg[0], t[0]),
+                    lerp(bg[1], fg[1], t[1]),
+                    lerp(bg[2], fg[2], t[2]),
+                ];
                 let back = composite(unblend(drawn, fg, bg), bg);
                 for c in 0..3 {
-                    assert!((back[c] - drawn[c]).abs() <= 1, "fg {fg:?} t {t:?}: {back:?} != {drawn:?}");
+                    assert!(
+                        (back[c] - drawn[c]).abs() <= 1,
+                        "fg {fg:?} t {t:?}: {back:?} != {drawn:?}"
+                    );
                 }
             }
         }
-        assert_eq!(unblend(bg, [26, 26, 26], bg), 0, "untouched background is transparent");
-        assert_eq!(unblend([26, 26, 26], [26, 26, 26], bg) >> 24, 255, "full coverage is opaque");
+        assert_eq!(
+            unblend(bg, [26, 26, 26], bg),
+            0,
+            "untouched background is transparent"
+        );
+        assert_eq!(
+            unblend([26, 26, 26], [26, 26, 26], bg) >> 24,
+            255,
+            "full coverage is opaque"
+        );
     }
 
     #[test]
     fn layouts_match_the_16px_design_and_fit_every_size() {
         let geometry = |g| {
             let l = layout(16, g);
-            (l.body_x, l.body_y, l.body_w, l.body_h, l.text_top, l.text_h, l.max_w, l.max_h)
+            (
+                l.body_x, l.body_y, l.body_w, l.body_h, l.text_top, l.text_h, l.max_w, l.max_h,
+            )
         };
         assert_eq!(geometry(BatteryGlyph::Below), (3, 10, 10, 6, 0, 8, 14, 8));
         assert_eq!(geometry(BatteryGlyph::Above), (3, 0, 10, 6, 8, 8, 14, 8));
@@ -713,16 +758,31 @@ mod tests {
         for size in [16, 20, 24, 32] {
             for g in BatteryGlyph::ALL {
                 let l = layout(size, g);
-                assert!(l.max_h <= l.text_h, "{size} {g:?}: digits taller than their box");
-                assert!(l.text_top + l.text_h <= size, "{size} {g:?}: text box off the icon");
-                assert!(l.body_x + l.body_w + l.line <= size, "{size} {g:?}: glyph too wide");
-                assert!(l.body_y + l.body_h <= size, "{size} {g:?}: glyph off the icon");
+                assert!(
+                    l.max_h <= l.text_h,
+                    "{size} {g:?}: digits taller than their box"
+                );
+                assert!(
+                    l.text_top + l.text_h <= size,
+                    "{size} {g:?}: text box off the icon"
+                );
+                assert!(
+                    l.body_x + l.body_w + l.line <= size,
+                    "{size} {g:?}: glyph too wide"
+                );
+                assert!(
+                    l.body_y + l.body_h <= size,
+                    "{size} {g:?}: glyph off the icon"
+                );
                 let gap = match g {
                     BatteryGlyph::Hidden => continue,
                     BatteryGlyph::Above => l.text_top - (l.body_y + l.body_h),
                     BatteryGlyph::Below => l.body_y - (l.text_top + l.text_h),
                 };
-                assert!(gap >= 2, "{size} {g:?}: {gap}-row gap merges text and glyph");
+                assert!(
+                    gap >= 2,
+                    "{size} {g:?}: {gap}-row gap merges text and glyph"
+                );
             }
         }
     }
@@ -743,7 +803,14 @@ mod tests {
         let (fg, bg) = (LIGHT_NORMAL, LIGHT_TASKBAR);
         let fill = colorref_pixel(bg);
         let mut px = vec![fill; 256];
-        paint_battery(&mut px, 16, &layout(16, BatteryGlyph::Below), Some(70), fg, bg);
+        paint_battery(
+            &mut px,
+            16,
+            &layout(16, BatteryGlyph::Below),
+            Some(70),
+            fg,
+            bg,
+        );
         let at = |x: usize, y: usize| px[y * 16 + x];
         let outline = at(3, 10);
         assert_ne!(outline, fill);
@@ -757,7 +824,10 @@ mod tests {
         assert_eq!(at(4, 13), colorref_pixel(fg));
         assert_eq!(at(9, 13), colorref_pixel(fg));
         assert_eq!(at(10, 13), fill);
-        assert!(px[..16 * 10].iter().all(|&p| p == fill), "glyph stays below the text");
+        assert!(
+            px[..16 * 10].iter().all(|&p| p == fill),
+            "glyph stays below the text"
+        );
     }
 
     /// `text` at `size` px on a light taskbar stays within the layout's text
@@ -793,7 +863,10 @@ mod tests {
         let (left, right) = (x0, size - 1 - x1);
         let (top, bottom) = (y0 - text_top, text_top + text_h - 1 - y1);
         assert!(top >= 0, "{text}@{size}: text above its box");
-        assert!(bottom >= 0, "{text}@{size}: text runs into the battery glyph");
+        assert!(
+            bottom >= 0,
+            "{text}@{size}: text runs into the battery glyph"
+        );
         assert!((left - right).abs() <= 1, "{text}@{size}: L{left} R{right}");
         assert!((top - bottom).abs() <= 1, "{text}@{size}: T{top} B{bottom}");
     }
@@ -811,7 +884,10 @@ mod tests {
         }
         for glyph in BatteryGlyph::ALL {
             for text in ["7", "42", "100", "?", "…"] {
-                assert!(!battery_icon(text, COLOR_NORMAL, glyph).raw().is_null(), "{text}");
+                assert!(
+                    !battery_icon(text, COLOR_NORMAL, glyph).raw().is_null(),
+                    "{text}"
+                );
             }
         }
         // Warm up (fonts/DCs may be cached by GDI on first use).

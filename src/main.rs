@@ -411,7 +411,12 @@ fn show_menu(hwnd: HWND) {
                 wide(glyph_label(g)).as_ptr(),
             );
         }
-        AppendMenuW(menu, MF_POPUP, icon_sub as usize, wide("Battery icon").as_ptr());
+        AppendMenuW(
+            menu,
+            MF_POPUP,
+            icon_sub as usize,
+            wide("Battery icon").as_ptr(),
+        );
         AppendMenuW(
             menu,
             MF_STRING | if autostart { MF_CHECKED } else { 0 },
@@ -472,8 +477,9 @@ fn glyph_label(g: BatteryGlyph) -> &'static str {
 
 const SETTINGS_KEY: &str = "Software\\mousebatt";
 const GLYPH_VALUE: &str = "BatteryGlyph";
-/// Used until the user picks another from the menu.
-const DEFAULT_GLYPH: BatteryGlyph = BatteryGlyph::Below;
+/// Used until the user picks another from the menu: the plain number, as
+/// before the glyph existed.
+const DEFAULT_GLYPH: BatteryGlyph = BatteryGlyph::Hidden;
 
 /// The REG_DWORD stored for a battery-icon choice.
 fn glyph_setting(g: BatteryGlyph) -> u32 {
