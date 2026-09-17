@@ -52,35 +52,69 @@ const MIN_EM: i32 = 6;
 // inside reads as the solid part.
 const OUTLINE_OPACITY: f32 = 0.85;
 
-/// Where things go in a `size`-px icon: a small battery glyph across the top
-/// and the digits below it. At 16 px: a 10x6 body plus a 1x4 terminal (close
-/// to a real battery's proportions), a 2-row gap (one row let them merge at
-/// tray size), then the bottom 8 rows for digits up to 8 px tall and 14 px
-/// wide. A bigger glyph would leave the digits too small to read.
+/// Whether and where a small battery glyph is drawn with the digits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BatteryGlyph {
+    Hidden,
+    Above,
+    Below,
+}
+
+impl BatteryGlyph {
+    pub const ALL: [BatteryGlyph; 3] = [BatteryGlyph::Hidden, BatteryGlyph::Above, BatteryGlyph::Below];
+}
+
+/// Where things go in a `size`-px icon. At 16 px, with the glyph: 8 rows for
+/// digits up to 8 px tall and 14 px wide, a 2-row gap (one row let them merge
+/// at tray size) and a 10x6 body plus a 1x4 terminal (close to a real
+/// battery's proportions), a bigger glyph leaving the digits too small to
+/// read. Without it the digits get the whole icon, up to 10 px tall.
 struct Layout {
     line: i32,
     body_x: i32,
+    body_y: i32,
     body_w: i32,
     body_h: i32,
     text_top: i32,
+    text_h: i32,
     max_w: i32,
     max_h: i32,
 }
 
-fn layout(size: i32) -> Layout {
+fn layout(size: i32, glyph: BatteryGlyph) -> Layout {
     let line = (size / 16).max(1);
     let body_w = size * 10 / 16;
     let body_h = size * 6 / 16;
-    Layout {
+    let gap = (size / 8).max(2);
+    let with_glyph = Layout {
         line,
         // Centre the body alone: the short terminal adds little visual weight,
         // and centring it too made the glyph look shifted left.
         body_x: (size - body_w) / 2,
+        body_y: 0,
         body_w,
         body_h,
-        text_top: body_h + (size / 8).max(2),
+        text_top: 0,
+        text_h: size - body_h - gap,
         max_w: size * 14 / 16,
         max_h: size / 2,
+    };
+    match glyph {
+        BatteryGlyph::Hidden => Layout {
+            body_w: 0,
+            body_h: 0,
+            text_h: size,
+            max_h: size * 10 / 16,
+            ..with_glyph
+        },
+        BatteryGlyph::Above => Layout {
+            text_top: body_h + gap,
+            ..with_glyph
+        },
+        BatteryGlyph::Below => Layout {
+            body_y: size - body_h,
+            ..with_glyph
+        },
     }
 }
 
@@ -459,6 +493,7 @@ fn text_pixels(text: &str, size: i32, l: &Layout, fg: u32, bg: u32) -> Vec<u32> 
     let mut out = vec![fill; (size * size) as usize];
     let &Layout {
         text_top,
+        text_h,
         max_w,
         max_h,
         ..
@@ -481,9 +516,8 @@ fn text_pixels(text: &str, size: i32, l: &Layout, fg: u32, bg: u32) -> Vec<u32> 
         let (w, h) = (t[2] - t[0] + 1, d[3] - d[1] + 1);
         if (w <= max_w && h <= max_h) || em == MIN_EM {
             let n = canvas.size;
-            let box_h = size - text_top;
-            let (dx, dy) = ((size - w) / 2 - t[0], text_top + (box_h - h) / 2 - d[1]);
-            for y in text_top..size {
+            let (dx, dy) = ((size - w) / 2 - t[0], text_top + (text_h - h) / 2 - d[1]);
+            for y in text_top..text_top + text_h {
                 for x in 0..size {
                     let (sx, sy) = (x - dx, y - dy);
                     if (0..n).contains(&sx) && (0..n).contains(&sy) {
@@ -514,6 +548,7 @@ fn paint_battery(drawn: &mut [u32], size: i32, l: &Layout, percent: Option<u8>, 
     let &Layout {
         line,
         body_x,
+        body_y,
         body_w,
         body_h,
         ..
@@ -527,10 +562,11 @@ fn paint_battery(drawn: &mut [u32], size: i32, l: &Layout, percent: Option<u8>, 
     let solid = colorref_pixel(fg);
     let mut put = |x: i32, y: i32, px: u32| drawn[(y * size + x) as usize] = px;
 
-    for y in 0..body_h {
+    let (top, bottom) = (body_y, body_y + body_h);
+    for y in top..bottom {
         for x in body_x..body_x + body_w {
-            let edge = y < line
-                || y >= body_h - line
+            let edge = y < top + line
+                || y >= bottom - line
                 || x < body_x + line
                 || x >= body_x + body_w - line;
             if edge {
@@ -538,14 +574,14 @@ fn paint_battery(drawn: &mut [u32], size: i32, l: &Layout, percent: Option<u8>, 
             }
         }
     }
-    for y in line..body_h - line {
+    for y in top + line..bottom - line {
         for x in body_x + body_w..body_x + body_w + line {
             put(x, y, outline); // terminal
         }
     }
     let inner_x = body_x + line;
     let filled = fill_width(body_w - 2 * line, percent);
-    for y in line..body_h - line {
+    for y in top + line..bottom - line {
         for x in inner_x..inner_x + filled {
             put(x, y, solid);
         }
@@ -554,7 +590,7 @@ fn paint_battery(drawn: &mut [u32], size: i32, l: &Layout, percent: Option<u8>, 
 
 /// The tray icon for `text`, the battery percentage or a placeholder such as
 /// "…" (drawn with an empty battery), in palette colour `color`.
-pub fn battery_icon(text: &str, color: u32) -> Hicon {
+pub fn battery_icon(text: &str, color: u32, glyph: BatteryGlyph) -> Hicon {
     let size = icon_size();
     let Some(mut canvas) = Canvas::new(size) else {
         return Hicon(null_mut());
@@ -562,9 +598,11 @@ pub fn battery_icon(text: &str, color: u32) -> Hicon {
     let light = taskbar_is_light();
     let fg = if light { light_variant(color) } else { color };
     let bg = taskbar_color(light);
-    let l = layout(size);
+    let l = layout(size, glyph);
     let mut drawn = text_pixels(text, size, &l, fg, bg);
-    paint_battery(&mut drawn, size, &l, text.parse().ok(), fg, bg);
+    if glyph != BatteryGlyph::Hidden {
+        paint_battery(&mut drawn, size, &l, text.parse().ok(), fg, bg);
+    }
     let (fg_rgb, bg_rgb) = (colorref_rgb(fg), colorref_rgb(bg));
     for (px, &d) in canvas.pixels().iter_mut().zip(&drawn) {
         *px = unblend(pixel_rgb(d), fg_rgb, bg_rgb);
@@ -664,16 +702,28 @@ mod tests {
     }
 
     #[test]
-    fn layout_matches_the_16px_design_and_fits_every_size() {
-        let l = layout(16);
-        assert_eq!(
-            (l.line, l.body_x, l.body_w, l.body_h, l.text_top, l.max_w, l.max_h),
-            (1, 3, 10, 6, 8, 14, 8)
-        );
+    fn layouts_match_the_16px_design_and_fit_every_size() {
+        let geometry = |g| {
+            let l = layout(16, g);
+            (l.body_x, l.body_y, l.body_w, l.body_h, l.text_top, l.text_h, l.max_w, l.max_h)
+        };
+        assert_eq!(geometry(BatteryGlyph::Below), (3, 10, 10, 6, 0, 8, 14, 8));
+        assert_eq!(geometry(BatteryGlyph::Above), (3, 0, 10, 6, 8, 8, 14, 8));
+        assert_eq!(geometry(BatteryGlyph::Hidden), (3, 0, 0, 0, 0, 16, 14, 10));
         for size in [16, 20, 24, 32] {
-            let l = layout(size);
-            assert!(l.body_x + l.body_w + l.line <= size, "{size}: glyph too wide");
-            assert!(l.text_top + l.max_h <= size, "{size}: text box too tall");
+            for g in BatteryGlyph::ALL {
+                let l = layout(size, g);
+                assert!(l.max_h <= l.text_h, "{size} {g:?}: digits taller than their box");
+                assert!(l.text_top + l.text_h <= size, "{size} {g:?}: text box off the icon");
+                assert!(l.body_x + l.body_w + l.line <= size, "{size} {g:?}: glyph too wide");
+                assert!(l.body_y + l.body_h <= size, "{size} {g:?}: glyph off the icon");
+                let gap = match g {
+                    BatteryGlyph::Hidden => continue,
+                    BatteryGlyph::Above => l.text_top - (l.body_y + l.body_h),
+                    BatteryGlyph::Below => l.body_y - (l.text_top + l.text_h),
+                };
+                assert!(gap >= 2, "{size} {g:?}: {gap}-row gap merges text and glyph");
+            }
         }
     }
 
@@ -693,34 +743,36 @@ mod tests {
         let (fg, bg) = (LIGHT_NORMAL, LIGHT_TASKBAR);
         let fill = colorref_pixel(bg);
         let mut px = vec![fill; 256];
-        paint_battery(&mut px, 16, &layout(16), Some(70), fg, bg);
+        paint_battery(&mut px, 16, &layout(16, BatteryGlyph::Below), Some(70), fg, bg);
         let at = |x: usize, y: usize| px[y * 16 + x];
-        let outline = at(3, 0);
+        let outline = at(3, 10);
         assert_ne!(outline, fill);
-        for (x, y) in [(12, 0), (3, 5), (12, 5), (13, 1), (13, 4)] {
+        for (x, y) in [(12, 10), (3, 15), (12, 15), (13, 11), (13, 14)] {
             assert_eq!(at(x, y), outline, "outline/terminal at ({x},{y})");
         }
-        for (x, y) in [(13, 0), (13, 5), (2, 3), (14, 3)] {
+        for (x, y) in [(13, 10), (13, 15), (2, 13), (14, 13)] {
             assert_eq!(at(x, y), fill, "background at ({x},{y})");
         }
         // 70% of the 8-px inside is 6 px.
-        assert_eq!(at(4, 3), colorref_pixel(fg));
-        assert_eq!(at(9, 3), colorref_pixel(fg));
-        assert_eq!(at(10, 3), fill);
-        assert!(px[16 * 6..].iter().all(|&p| p == fill), "glyph stays above the text box");
+        assert_eq!(at(4, 13), colorref_pixel(fg));
+        assert_eq!(at(9, 13), colorref_pixel(fg));
+        assert_eq!(at(10, 13), fill);
+        assert!(px[..16 * 10].iter().all(|&p| p == fill), "glyph stays below the text");
     }
 
     /// `text` at `size` px on a light taskbar stays within the layout's text
     /// box and is centred in it.
-    fn assert_fits_and_centred(text: &str, size: i32) {
+    fn assert_fits_and_centred(text: &str, size: i32, glyph: BatteryGlyph) {
+        let l = layout(size, glyph);
         let Layout {
             text_top,
+            text_h,
             max_w,
             max_h,
             ..
-        } = layout(size);
+        } = l;
         let bg = LIGHT_TASKBAR;
-        let px = text_pixels(text, size, &layout(size), LIGHT_NORMAL, bg);
+        let px = text_pixels(text, size, &l, LIGHT_NORMAL, bg);
         let bg_rgb = colorref_rgb(bg);
         let lit: Vec<(i32, i32)> = (0..size * size)
             .filter(|&i| {
@@ -738,8 +790,10 @@ mod tests {
         assert!(w <= max_w, "{text}@{size}: {w}px wide > {max_w}");
         // Round digits overshoot the flat ones by up to a pixel.
         assert!(h <= max_h + 1, "{text}@{size}: {h}px tall > {max_h}");
-        let (left, right, top, bottom) = (x0, size - 1 - x1, y0 - text_top, size - 1 - y1);
-        assert!(top >= 0, "{text}@{size}: text rises into the battery glyph");
+        let (left, right) = (x0, size - 1 - x1);
+        let (top, bottom) = (y0 - text_top, text_top + text_h - 1 - y1);
+        assert!(top >= 0, "{text}@{size}: text above its box");
+        assert!(bottom >= 0, "{text}@{size}: text runs into the battery glyph");
         assert!((left - right).abs() <= 1, "{text}@{size}: L{left} R{right}");
         assert!((top - bottom).abs() <= 1, "{text}@{size}: T{top} B{bottom}");
     }
@@ -749,22 +803,29 @@ mod tests {
     #[test]
     fn renders_fitted_icons_without_leaking_gdi_or_user_objects() {
         for size in [16, 20, 24] {
-            for text in ["88", "47", "100"] {
-                assert_fits_and_centred(text, size);
+            for glyph in BatteryGlyph::ALL {
+                for text in ["88", "47", "100"] {
+                    assert_fits_and_centred(text, size, glyph);
+                }
             }
         }
-        for text in ["7", "42", "100", "?", "…"] {
-            assert!(!battery_icon(text, COLOR_NORMAL).raw().is_null(), "{text}");
+        for glyph in BatteryGlyph::ALL {
+            for text in ["7", "42", "100", "?", "…"] {
+                assert!(!battery_icon(text, COLOR_NORMAL, glyph).raw().is_null(), "{text}");
+            }
         }
         // Warm up (fonts/DCs may be cached by GDI on first use).
         for _ in 0..5 {
-            let _ = battery_icon("50", COLOR_NORMAL);
-            let _ = battery_icon("15", COLOR_LOW);
+            for glyph in BatteryGlyph::ALL {
+                let _ = battery_icon("50", COLOR_NORMAL, glyph);
+                let _ = battery_icon("15", COLOR_LOW, glyph);
+            }
         }
         let before = gui_counts();
         for i in 0..300u32 {
             let text = (i % 101).to_string();
-            let icon = battery_icon(&text, COLOR_LOW);
+            let glyph = BatteryGlyph::ALL[i as usize % 3];
+            let icon = battery_icon(&text, COLOR_LOW, glyph);
             assert!(!icon.raw().is_null());
             drop(icon);
         }

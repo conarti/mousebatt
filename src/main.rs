@@ -10,18 +10,20 @@ mod hid;
 mod icon;
 mod protocol;
 
-use std::cell::RefCell;
-use std::mem::zeroed;
+use std::cell::{Cell, RefCell};
+use std::ffi::c_void;
+use std::mem::{size_of, zeroed};
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 
-use icon::Hicon;
+use icon::{BatteryGlyph, Hicon};
 use protocol::{read_battery, set_polling, BatteryStatus, ReadResult};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Registry::{
-    RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
-    HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_SZ,
+    RegCloseKey, RegDeleteValueW, RegGetValueW, RegOpenKeyExW, RegQueryValueExW, RegSetKeyValueW,
+    RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_DWORD, REG_SZ,
+    RRF_RT_REG_DWORD,
 };
 use windows_sys::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -51,6 +53,8 @@ const MENU_AUTOSTART: usize = 2;
 const MENU_EXIT: usize = 3;
 /// Polling-rate items are `MENU_RATE_BASE + index into PollingInfo::rates`.
 const MENU_RATE_BASE: usize = 100;
+/// Battery-icon items are `MENU_GLYPH_BASE + index into BatteryGlyph::ALL`.
+const MENU_GLYPH_BASE: usize = 200;
 
 // Not re-exported cleanly by windows-sys; values are stable Win32 ABI.
 const WM_DEVICECHANGE: u32 = 0x0219;
@@ -69,6 +73,10 @@ static REQUESTED_HZ: AtomicU16 = AtomicU16::new(0);
 thread_local! {
     static LAST_GOOD: RefCell<Option<BatteryStatus>> = const { RefCell::new(None) };
     static CUR_ICON: RefCell<Option<Hicon>> = const { RefCell::new(None) };
+    /// What the icon last showed, to redraw it when a display setting changes.
+    static LAST_VIEW: RefCell<Option<TrayView>> = const { RefCell::new(None) };
+    /// The user's battery-icon choice; loaded from the registry in `main`.
+    static GLYPH: Cell<BatteryGlyph> = const { Cell::new(DEFAULT_GLYPH) };
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -80,6 +88,7 @@ fn main() {
     // at 96 DPI and blurred by Windows' upscaling on scaled displays.
     // SAFETY: no preconditions; called before any window exists.
     unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+    GLYPH.with(|g| g.set(load_glyph()));
     let class_name = wide("mousebatt_tray_wnd");
     // SAFETY: WNDCLASSW is plain data for which all-zero is valid; `class_name`
     // outlives the window (it lives until `main` returns), and the other
@@ -259,6 +268,7 @@ fn on_poll_done(hwnd: HWND, result: ReadResult) {
 }
 
 /// What the tray should show for a poll result (pure; unit-tested).
+#[derive(Clone)]
 struct TrayView {
     text: String,
     color: u32,
@@ -321,7 +331,14 @@ fn base_nid(hwnd: HWND) -> NOTIFYICONDATAW {
 }
 
 fn update_tray(hwnd: HWND, text: &str, color: u32, tip: &str, add: bool) {
-    let new_icon = icon::battery_icon(text, color);
+    let new_icon = icon::battery_icon(text, color, GLYPH.with(Cell::get));
+    LAST_VIEW.with(|v| {
+        *v.borrow_mut() = Some(TrayView {
+            text: text.into(),
+            color,
+            tip: tip.into(),
+        })
+    });
     let mut nid = base_nid(hwnd);
     nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     nid.uCallbackMessage = WMAPP_TRAY;
@@ -342,6 +359,14 @@ fn update_tray(hwnd: HWND, text: &str, color: u32, tip: &str, add: bool) {
     CUR_ICON.with(|c| *c.borrow_mut() = Some(new_icon));
 }
 
+/// Redraw the icon with what it last showed, e.g. after a display setting
+/// changed, without waiting for the mouse.
+fn redraw_tray(hwnd: HWND) {
+    if let Some(v) = LAST_VIEW.with(|v| v.borrow().clone()) {
+        update_tray(hwnd, &v.text, v.color, &v.tip, false);
+    }
+}
+
 fn remove_tray(hwnd: HWND) {
     let nid = base_nid(hwnd);
     // SAFETY: `nid` is fully initialised with cbSize set.
@@ -350,6 +375,7 @@ fn remove_tray(hwnd: HWND) {
 
 fn show_menu(hwnd: HWND) {
     let autostart = autostart_enabled();
+    let glyph = GLYPH.with(Cell::get);
     let polling = LAST_GOOD.with(|g| g.borrow().as_ref().and_then(|s| s.polling));
     let mut pt = POINT { x: 0, y: 0 };
     // SAFETY: the menu (and the submenu it owns) is created and destroyed
@@ -376,6 +402,16 @@ fn show_menu(hwnd: HWND) {
             // DestroyMenu(menu) below also destroys the attached submenu.
             AppendMenuW(menu, MF_POPUP, sub as usize, wide("Polling rate").as_ptr());
         }
+        let icon_sub = CreatePopupMenu();
+        for (i, g) in BatteryGlyph::ALL.into_iter().enumerate() {
+            AppendMenuW(
+                icon_sub,
+                MF_STRING | if g == glyph { MF_CHECKED } else { 0 },
+                MENU_GLYPH_BASE + i,
+                wide(glyph_label(g)).as_ptr(),
+            );
+        }
+        AppendMenuW(menu, MF_POPUP, icon_sub as usize, wide("Battery icon").as_ptr());
         AppendMenuW(
             menu,
             MF_STRING | if autostart { MF_CHECKED } else { 0 },
@@ -408,7 +444,14 @@ fn show_menu(hwnd: HWND) {
             unsafe { PostQuitMessage(0) };
         }
         id => {
-            if let Some(&hz) = id
+            if let Some(&g) = id
+                .checked_sub(MENU_GLYPH_BASE)
+                .and_then(|i| BatteryGlyph::ALL.get(i))
+            {
+                GLYPH.with(|c| c.set(g));
+                save_glyph(g);
+                redraw_tray(hwnd);
+            } else if let Some(&hz) = id
                 .checked_sub(MENU_RATE_BASE)
                 .and_then(|i| polling?.rates.get(i))
             {
@@ -416,6 +459,75 @@ fn show_menu(hwnd: HWND) {
                 start_poll(hwnd);
             }
         }
+    }
+}
+
+fn glyph_label(g: BatteryGlyph) -> &'static str {
+    match g {
+        BatteryGlyph::Hidden => "Hidden",
+        BatteryGlyph::Above => "Above the number",
+        BatteryGlyph::Below => "Below the number",
+    }
+}
+
+const SETTINGS_KEY: &str = "Software\\mousebatt";
+const GLYPH_VALUE: &str = "BatteryGlyph";
+/// Used until the user picks another from the menu.
+const DEFAULT_GLYPH: BatteryGlyph = BatteryGlyph::Below;
+
+/// The REG_DWORD stored for a battery-icon choice.
+fn glyph_setting(g: BatteryGlyph) -> u32 {
+    match g {
+        BatteryGlyph::Hidden => 0,
+        BatteryGlyph::Above => 1,
+        BatteryGlyph::Below => 2,
+    }
+}
+
+fn glyph_from_setting(value: u32) -> Option<BatteryGlyph> {
+    BatteryGlyph::ALL
+        .into_iter()
+        .find(|&g| glyph_setting(g) == value)
+}
+
+/// The saved battery-icon choice, or the default if none (or an unknown one)
+/// is stored.
+fn load_glyph() -> BatteryGlyph {
+    let mut data: u32 = 0;
+    let mut size = size_of::<u32>() as u32;
+    // SAFETY: the name temporaries live for the full statement, and
+    // `data`/`size` describe a writable 4-byte buffer for a REG_DWORD.
+    let rc = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            wide(SETTINGS_KEY).as_ptr(),
+            wide(GLYPH_VALUE).as_ptr(),
+            RRF_RT_REG_DWORD,
+            null_mut(),
+            &mut data as *mut u32 as *mut c_void,
+            &mut size,
+        )
+    };
+    if rc == 0 {
+        glyph_from_setting(data).unwrap_or(DEFAULT_GLYPH)
+    } else {
+        DEFAULT_GLYPH
+    }
+}
+
+fn save_glyph(g: BatteryGlyph) {
+    let data = glyph_setting(g);
+    // SAFETY: the name temporaries live for the full statement, and `data` is
+    // a 4-byte REG_DWORD that is copied. The key is created if missing.
+    unsafe {
+        RegSetKeyValueW(
+            HKEY_CURRENT_USER,
+            wide(SETTINGS_KEY).as_ptr(),
+            wide(GLYPH_VALUE).as_ptr(),
+            REG_DWORD,
+            &data as *const u32 as *const c_void,
+            size_of::<u32>() as u32,
+        );
     }
 }
 
@@ -562,6 +674,16 @@ mod tests {
         let v = tray_view(&ReadResult::NoResponse("X3".into()), None);
         assert_eq!(v.text, "?");
         assert_eq!(v.tip, "X3 — not responding (asleep?)");
+    }
+
+    #[test]
+    fn glyph_setting_round_trips_and_ignores_unknown_values() {
+        for g in BatteryGlyph::ALL {
+            assert_eq!(glyph_from_setting(glyph_setting(g)), Some(g));
+        }
+        let stored: Vec<u32> = BatteryGlyph::ALL.into_iter().map(glyph_setting).collect();
+        assert_eq!(stored, [0, 1, 2], "stored values must stay stable");
+        assert_eq!(glyph_from_setting(3), None);
     }
 
     #[test]
