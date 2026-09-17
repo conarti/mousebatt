@@ -9,6 +9,7 @@ use std::ffi::c_void;
 use std::mem::{size_of, zeroed};
 use std::ptr::{null, null_mut};
 use std::slice;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use windows_sys::Win32::Foundation::RECT;
 use windows_sys::Win32::Graphics::Gdi::{
@@ -279,6 +280,38 @@ fn taskbar_color(light: bool) -> u32 {
         color
     } else {
         fallback
+    }
+}
+
+/// The colour last read by `refresh_taskbar_color`, with LIGHT_TAG set if it
+/// was read in Light mode, or NO_TASKBAR_COLOR before the first read.
+static TASKBAR_COLOR: AtomicU32 = AtomicU32::new(NO_TASKBAR_COLOR);
+const NO_TASKBAR_COLOR: u32 = u32::MAX;
+const LIGHT_TAG: u32 = 1 << 24;
+
+/// Read the taskbar colour off the screen and remember it for `battery_icon`.
+/// Screen reads go through the compositor and can stall, so call this from a
+/// worker thread, never the UI thread.
+pub fn refresh_taskbar_color() {
+    let light = taskbar_is_light();
+    let tag = if light { LIGHT_TAG } else { 0 };
+    TASKBAR_COLOR.store(taskbar_color(light) | tag, Ordering::Relaxed);
+}
+
+/// The remembered taskbar colour if it was read in the current mode, otherwise
+/// that mode's usual shade. Never touches the screen.
+fn cached_taskbar_color(light: bool) -> u32 {
+    remembered_or_fallback(TASKBAR_COLOR.load(Ordering::Relaxed), light)
+}
+
+fn remembered_or_fallback(stored: u32, light: bool) -> u32 {
+    let tag = if light { LIGHT_TAG } else { 0 };
+    if stored != NO_TASKBAR_COLOR && stored & LIGHT_TAG == tag {
+        stored & 0x00FF_FFFF
+    } else if light {
+        LIGHT_TASKBAR
+    } else {
+        DARK_TASKBAR
     }
 }
 
@@ -619,7 +652,7 @@ pub fn battery_icon(text: &str, color: u32, glyph: BatteryGlyph) -> Hicon {
     };
     let light = taskbar_is_light();
     let fg = if light { light_variant(color) } else { color };
-    let bg = taskbar_color(light);
+    let bg = cached_taskbar_color(light);
     let l = layout(size, glyph);
     let mut drawn = text_pixels(text, size, &l, fg, bg);
     if glyph != BatteryGlyph::Hidden {
@@ -742,6 +775,23 @@ mod tests {
             255,
             "full coverage is opaque"
         );
+    }
+
+    #[test]
+    fn remembered_taskbar_colour_only_applies_to_its_mode() {
+        assert_eq!(
+            remembered_or_fallback(NO_TASKBAR_COLOR, true),
+            LIGHT_TASKBAR
+        );
+        assert_eq!(
+            remembered_or_fallback(NO_TASKBAR_COLOR, false),
+            DARK_TASKBAR
+        );
+        let read_light = 0x00E1DAD7 | LIGHT_TAG;
+        assert_eq!(remembered_or_fallback(read_light, true), 0x00E1DAD7);
+        assert_eq!(remembered_or_fallback(read_light, false), DARK_TASKBAR);
+        assert_eq!(remembered_or_fallback(0x00202020, false), 0x00202020);
+        assert_eq!(remembered_or_fallback(0x00202020, true), LIGHT_TASKBAR);
     }
 
     #[test]

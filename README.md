@@ -92,8 +92,8 @@ and reads the reply. The only thing it ever writes to a mouse is the polling rat
 pick from the menu. The "Start with Windows" toggle writes one value under
 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, and the **Battery icon** choice is
 saved under `HKCU\Software\mousebatt`. To match the icon to the taskbar it reads the
-colour of a few taskbar pixels next to the notification area when redrawing; nothing
-else on screen is read.
+colour of a few taskbar pixels next to the notification area each time it polls the
+mouse; nothing else on screen is read.
 
 ## Adding a mouse
 

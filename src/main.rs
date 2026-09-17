@@ -231,6 +231,9 @@ fn start_poll(hwnd: HWND) {
     }
     let hwnd_addr = hwnd as usize;
     std::thread::spawn(move || {
+        // Screen reads can stall, so the icon's background colour is read
+        // here rather than on the UI thread when drawing.
+        icon::refresh_taskbar_color();
         let hz = REQUESTED_HZ.swap(0, Ordering::SeqCst);
         if hz != 0 {
             // Success shows up as the moved check mark after the re-read.
