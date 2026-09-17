@@ -23,6 +23,9 @@ use windows_sys::Win32::System::Registry::{
     RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
     HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_SZ,
 };
+use windows_sys::Win32::UI::HiDpi::{
+    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+};
 use windows_sys::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
     NOTIFYICONDATAW,
@@ -54,6 +57,7 @@ const WM_DEVICECHANGE: u32 = 0x0219;
 const DBT_DEVNODES_CHANGED: usize = 0x0007;
 const WM_POWERBROADCAST: u32 = 0x0218;
 const PBT_APMRESUMEAUTOMATIC: usize = 0x0012;
+const WM_SETTINGCHANGE: u32 = 0x001A;
 
 static POLLING: AtomicBool = AtomicBool::new(false);
 static TASKBAR_CREATED_MSG: AtomicU32 = AtomicU32::new(0);
@@ -72,6 +76,10 @@ fn wide(s: &str) -> Vec<u16> {
 }
 
 fn main() {
+    // DPI aware, so the icon is drawn at the tray's real pixel size rather than
+    // at 96 DPI and blurred by Windows' upscaling on scaled displays.
+    // SAFETY: no preconditions; called before any window exists.
+    unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     let class_name = wide("mousebatt_tray_wnd");
     // SAFETY: WNDCLASSW is plain data for which all-zero is valid; `class_name`
     // outlives the window (it lives until `main` returns), and the other
@@ -149,6 +157,24 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             if wparam == PBT_APMRESUMEAUTOMATIC {
                 // SAFETY: plain handle + id arguments; no callback pointer.
                 unsafe { SetTimer(hwnd, TIMER_DEBOUNCE, 5000, None) };
+            }
+            0
+        }
+        WM_SETTINGCHANGE => {
+            // Light/dark switch: re-read so the icon is redrawn in the matching palette.
+            if lparam != 0 {
+                let p = lparam as *const u16;
+                // SAFETY: a non-null lparam of WM_SETTINGCHANGE is a
+                // null-terminated wide string; `all` stops at the first
+                // mismatch, so it never reads past the terminator.
+                let theme = wide("ImmersiveColorSet")
+                    .iter()
+                    .enumerate()
+                    .all(|(i, &c)| unsafe { *p.add(i) } == c);
+                if theme {
+                    // SAFETY: plain handle + id arguments; no callback pointer.
+                    unsafe { SetTimer(hwnd, TIMER_DEBOUNCE, DEBOUNCE_MS, None) };
+                }
             }
             0
         }
