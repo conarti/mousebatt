@@ -46,8 +46,10 @@ const DEBOUNCE_MS: u32 = 2500; // one replug fires many WM_DEVICECHANGE broadcas
 
 const WMAPP_TRAY: u32 = WM_APP + 1;
 const WMAPP_POLLDONE: u32 = WM_APP + 2;
+const WMAPP_REDRAW: u32 = WM_APP + 3;
 const TIMER_POLL: usize = 1;
 const TIMER_DEBOUNCE: usize = 2;
+const TIMER_THEME: usize = 3;
 const MENU_REFRESH: usize = 1;
 const MENU_AUTOSTART: usize = 2;
 const MENU_EXIT: usize = 3;
@@ -62,6 +64,7 @@ const DBT_DEVNODES_CHANGED: usize = 0x0007;
 const WM_POWERBROADCAST: u32 = 0x0218;
 const PBT_APMRESUMEAUTOMATIC: usize = 0x0012;
 const WM_SETTINGCHANGE: u32 = 0x001A;
+const WM_DPICHANGED: u32 = 0x02E0;
 
 static POLLING: AtomicBool = AtomicBool::new(false);
 static TASKBAR_CREATED_MSG: AtomicU32 = AtomicU32::new(0);
@@ -151,8 +154,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             if wparam == TIMER_DEBOUNCE {
                 // SAFETY: plain handle + id arguments.
                 unsafe { KillTimer(hwnd, TIMER_DEBOUNCE) };
+                start_poll(hwnd);
+            } else if wparam == TIMER_THEME {
+                // SAFETY: plain handle + id arguments.
+                unsafe { KillTimer(hwnd, TIMER_THEME) };
+                redraw_worker(hwnd);
             }
-            start_poll(hwnd);
             0
         }
         WM_DEVICECHANGE => {
@@ -181,10 +188,21 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     .enumerate()
                     .all(|(i, &c)| unsafe { *p.add(i) } == c);
                 if theme {
+                    // A fresh taskbar colour and a redraw of the last view are
+                    // all a theme switch needs, so it gets its own path instead
+                    // of a mouse poll (which would be dropped while one is in
+                    // flight). This also stops every accent-colour broadcast
+                    // from HID-polling the mouse.
                     // SAFETY: plain handle + id arguments; no callback pointer.
-                    unsafe { SetTimer(hwnd, TIMER_DEBOUNCE, DEBOUNCE_MS, None) };
+                    unsafe { SetTimer(hwnd, TIMER_THEME, 300, None) };
                 }
             }
+            0
+        }
+        WM_DPICHANGED => {
+            // The tray's scale changed (a monitor's was, or the taskbar moved
+            // to one with a different scale); render at the new size.
+            redraw_worker(hwnd);
             0
         }
         WMAPP_POLLDONE => {
@@ -193,6 +211,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             // the single place that reclaims it, so it is freed exactly once.
             let result = unsafe { *Box::from_raw(lparam as *mut ReadResult) };
             on_poll_done(hwnd, result);
+            0
+        }
+        WMAPP_REDRAW => {
+            // Redrawn with the last reading, in the palette the worker just
+            // read off the taskbar.
+            redraw_tray(hwnd);
             0
         }
         WMAPP_TRAY => match (lparam & 0xffff) as u32 {
@@ -231,9 +255,6 @@ fn start_poll(hwnd: HWND) {
     }
     let hwnd_addr = hwnd as usize;
     std::thread::spawn(move || {
-        // Screen reads can stall, so the icon's background colour is read
-        // here rather than on the UI thread when drawing.
-        icon::refresh_taskbar_color();
         let hz = REQUESTED_HZ.swap(0, Ordering::SeqCst);
         if hz != 0 {
             // Success shows up as the moved check mark after the re-read.
@@ -250,6 +271,24 @@ fn start_poll(hwnd: HWND) {
             drop(unsafe { Box::from_raw(result) });
         }
         POLLING.store(false, Ordering::SeqCst);
+        // The taskbar colour is refreshed only after the result is posted: a
+        // screen read can stall (fullscreen transitions, the lock screen) and
+        // must never gate the battery read, and a failed read can cost the
+        // colour but not the poll.
+        icon::refresh_taskbar_color();
+    });
+}
+
+/// Re-read the taskbar colour off-screen and redraw what the icon last
+/// showed. `refresh_taskbar_color` goes through the screen DC, so it runs on
+/// a worker, and the redraw is posted back to the UI thread.
+fn redraw_worker(hwnd: HWND) {
+    let hwnd_addr = hwnd as usize;
+    std::thread::spawn(move || {
+        icon::refresh_taskbar_color();
+        // SAFETY: WMAPP_REDRAW carries no payload and `wndproc` ignores both
+        // parameters.
+        unsafe { PostMessageW(hwnd_addr as HWND, WMAPP_REDRAW, 0, 0) };
     });
 }
 

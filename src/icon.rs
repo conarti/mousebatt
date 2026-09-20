@@ -11,7 +11,7 @@ use std::ptr::{null, null_mut};
 use std::slice;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use windows_sys::Win32::Foundation::RECT;
+use windows_sys::Win32::Foundation::{HWND, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
     CreateBitmap, CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject,
     GdiFlush, GetDC, GetPixel, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TextOutW,
@@ -20,7 +20,7 @@ use windows_sys::Win32::Graphics::Gdi::{
     NONANTIALIASED_QUALITY, OUT_DEFAULT_PRECIS, TRANSPARENT,
 };
 use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
-use windows_sys::Win32::UI::HiDpi::{GetDpiForSystem, GetSystemMetricsForDpi};
+use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateIconIndirect, DestroyIcon, FindWindowExW, FindWindowW, GetWindowRect,
     SystemParametersInfoW, FE_FONTSMOOTHINGCLEARTYPE, HICON, ICONINFO, SM_CXSMICON,
@@ -157,16 +157,32 @@ fn taskbar_is_light() -> bool {
     rc == 0 && data != 0
 }
 
-/// Side of a tray icon at the system DPI (16 px at 100% scaling). Only
+/// Side of a tray icon at the taskbar's DPI (16 px at 100% scaling). Only
 /// accurate in a DPI-aware process (see `main`); otherwise it reads 96 DPI.
 fn icon_size() -> i32 {
-    // SAFETY: neither call has preconditions.
-    let size = unsafe { GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForSystem()) };
+    // The tray's own DPI: `GetDpiForSystem` is not valid from per-monitor-aware
+    // threads and would use the logon primary-monitor scale instead. `bar` is
+    // always a valid handle: null is the documented sentinel, and the real
+    // Shell_TrayWnd outlives the call.
+    let bar = tray_bar();
+    // SAFETY: `bar` is a valid window handle; the call has no other
+    // preconditions.
+    let dpi = unsafe { GetDpiForWindow(bar) };
+    // SAFETY: `dpi` is a window DPI and is a valid GetSystemMetricsForDpi input.
+    let size = unsafe { GetSystemMetricsForDpi(SM_CXSMICON, dpi) };
     if size > 0 {
         size
     } else {
         16
     }
+}
+
+/// The taskbar's window (a valid `HWND` even when it does not exist: null).
+fn tray_bar() -> HWND {
+    let bar_class = crate::wide("Shell_TrayWnd");
+    // SAFETY: the class name is a null-terminated wide string that outlives
+    // the call.
+    unsafe { FindWindowW(bar_class.as_ptr(), null()) }
 }
 
 /// The GDI font quality matching the user's font smoothing setting, so the
