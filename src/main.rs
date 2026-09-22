@@ -151,7 +151,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             0
         }
         WM_TIMER => {
-            if wparam == TIMER_DEBOUNCE {
+            if wparam == TIMER_POLL {
+                // Periodic heartbeat. This is what re-discovers a mouse that
+                // slept (and woke) while the system stayed up: no
+                // WM_DEVICECHANGE or power broadcast is sent for that, so
+                // without this the tray would sit stale until a manual
+                // refresh.
+                start_poll(hwnd);
+            } else if wparam == TIMER_DEBOUNCE {
                 // SAFETY: plain handle + id arguments.
                 unsafe { KillTimer(hwnd, TIMER_DEBOUNCE) };
                 start_poll(hwnd);
