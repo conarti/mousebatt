@@ -338,10 +338,11 @@ fn on_poll_done(hwnd: HWND, result: ReadResult) {
 /// What the tray should show for a poll result (pure; unit-tested).
 #[derive(Clone)]
 struct TrayView {
-    /// The charge the icon's battery fill reflects; `None` for a placeholder
-    /// ("?" digits, empty battery).
+    /// The charge the icon's battery fill reflects; `None` for an empty
+    /// battery (no reading yet, or no mouse).
     percent: Option<u8>,
-    /// The digit string drawn in the digit styles; not used by `GlyphOnly`.
+    /// The digits drawn in the digit styles: the percentage, "…" while the
+    /// first read is pending, or "?" with no reading. Not used by `GlyphOnly`.
     text: String,
     color: u32,
     tip: String,
@@ -407,7 +408,7 @@ fn base_nid(hwnd: HWND) -> NOTIFYICONDATAW {
 }
 
 fn update_tray(hwnd: HWND, percent: Option<u8>, text: &str, color: u32, tip: &str, add: bool) {
-    let new_icon = icon::battery_icon(percent, color, STYLE.with(Cell::get));
+    let new_icon = icon::battery_icon(percent, text, color, STYLE.with(Cell::get));
     LAST_VIEW.with(|v| {
         *v.borrow_mut() = Some(TrayView {
             percent,

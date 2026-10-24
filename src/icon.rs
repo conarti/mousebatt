@@ -127,12 +127,15 @@ fn layout(size: i32, style: IconStyle) -> Layout {
         },
         IconStyle::GlyphOnly => {
             // Largest body that keeps the battery's 10:6 proportion while
-            // leaving room for the terminal and a side margin. The terminal
-            // must stay inside the icon: `put` indexes the pixel buffer
-            // unchecked.
-            let margin = (size / 16).max(1);
+            // leaving room for the terminal and a side margin. The margin is
+            // even and the height rounded up to the icon's parity, so the
+            // spare pixels split equally on both axes (an odd remainder would
+            // all land right or below). The terminal must stay inside the
+            // icon: `put` indexes the pixel buffer unchecked.
+            let margin = 2 * line;
             let full_w = size - line - margin;
-            let full_h = full_w * 6 / 10;
+            let mut full_h = full_w * 6 / 10;
+            full_h += (size - full_h) % 2;
             Layout {
                 line,
                 body_x: (size - full_w - line) / 2,
@@ -687,10 +690,11 @@ fn paint_battery(drawn: &mut [u32], size: i32, l: &Layout, percent: Option<u8>, 
     }
 }
 
-/// The tray icon for `percent`, the battery percentage or `None` for a
-/// placeholder such as "?" (drawn with an empty battery), in palette colour
-/// `color` and the user's `style`.
-pub fn battery_icon(percent: Option<u8>, color: u32, style: IconStyle) -> Hicon {
+/// The tray icon in palette colour `color` and the user's `style`. `text` is
+/// the digits drawn by the digit styles: the percentage, or a placeholder
+/// such as "…" (reading) or "?" (no mouse). `percent` is the battery fill,
+/// `None` for an empty battery.
+pub fn battery_icon(percent: Option<u8>, text: &str, color: u32, style: IconStyle) -> Hicon {
     let size = icon_size();
     let Some(mut canvas) = Canvas::new(size) else {
         return Hicon(null_mut());
@@ -703,11 +707,7 @@ pub fn battery_icon(percent: Option<u8>, color: u32, style: IconStyle) -> Hicon 
         // No digits at all: skip the font rasterization entirely.
         vec![colorref_pixel(bg); (size * size) as usize]
     } else {
-        let text = match percent {
-            Some(p) => p.to_string(),
-            None => "?".into(),
-        };
-        text_pixels(&text, size, &l, fg, bg)
+        text_pixels(text, size, &l, fg, bg)
     };
     if style != IconStyle::Digits {
         paint_battery(&mut drawn, size, &l, percent, fg, bg);
@@ -865,7 +865,7 @@ mod tests {
             (3, 0, 10, 6, 8, 8, 14, 8)
         );
         assert_eq!(geometry(IconStyle::Digits), (3, 0, 0, 0, 0, 16, 14, 10));
-        assert_eq!(geometry(IconStyle::GlyphOnly), (0, 4, 14, 8, 0, 0, 0, 0));
+        assert_eq!(geometry(IconStyle::GlyphOnly), (1, 4, 13, 8, 0, 0, 0, 0));
         for size in [16, 20, 24, 32, 40, 48] {
             for s in IconStyle::ALL {
                 let l = layout(size, s);
@@ -885,6 +885,12 @@ mod tests {
                     l.body_y + l.body_h <= size,
                     "{size} {s:?}: glyph off the icon"
                 );
+                if s == IconStyle::GlyphOnly {
+                    let right = size - (l.body_x + l.body_w + l.line);
+                    let bottom = size - (l.body_y + l.body_h);
+                    assert_eq!(l.body_x, right, "{size}: glyph off-centre horizontally");
+                    assert_eq!(l.body_y, bottom, "{size}: glyph off-centre vertically");
+                }
                 let gap = match s {
                     IconStyle::Digits | IconStyle::GlyphOnly => continue,
                     IconStyle::DigitsGlyphAbove => l.text_top - (l.body_y + l.body_h),
@@ -942,7 +948,7 @@ mod tests {
     }
 
     /// The glyph-only icon at 16 px: outline and terminal present, the inside
-    /// filled to exactly `fill_width` of the 12-px interior. (That the digit
+    /// filled to exactly `fill_width` of the 11-px interior. (That the digit
     /// text is never drawn in this style is a property of `battery_icon`,
     /// which this hermetic test does not call.)
     #[test]
@@ -955,15 +961,17 @@ mod tests {
 
         let mut px = vec![fill; 256];
         paint_battery(&mut px, 16, &l, Some(0), fg, bg);
-        let outline = at(&px, 0, 4);
+        let outline = at(&px, 1, 4);
         assert_ne!(outline, fill);
+        assert_eq!(at(&px, 0, 8), fill, "1-px margin left of the body");
         assert_eq!(at(&px, 14, 8), outline, "terminal");
-        assert_eq!(at(&px, 1, 8), fill, "no fill at 0%");
+        assert_eq!(at(&px, 15, 8), fill, "1-px margin right of the terminal");
+        assert_eq!(at(&px, 2, 8), fill, "no fill at 0%");
 
         let mut px = vec![fill; 256];
         paint_battery(&mut px, 16, &l, Some(50), fg, bg);
-        assert_eq!(at(&px, 6, 8), solid, "inside filled up to 50%");
-        assert_eq!(at(&px, 7, 8), fill, "inside empty past 50%");
+        assert_eq!(at(&px, 7, 8), solid, "inside filled up to 50%");
+        assert_eq!(at(&px, 8, 8), fill, "inside empty past 50%");
 
         let mut px = vec![fill; 256];
         paint_battery(&mut px, 16, &l, Some(100), fg, bg);
@@ -1028,25 +1036,33 @@ mod tests {
             }
         }
         for style in IconStyle::ALL {
-            for percent in [Some(7), Some(42), Some(100), None] {
+            for (percent, text) in [
+                (Some(7), "7"),
+                (Some(42), "42"),
+                (Some(100), "100"),
+                (None, "?"),
+                (None, "…"),
+            ] {
                 assert!(
-                    !battery_icon(percent, COLOR_NORMAL, style).raw().is_null(),
-                    "{percent:?}"
+                    !battery_icon(percent, text, COLOR_NORMAL, style)
+                        .raw()
+                        .is_null(),
+                    "{text}"
                 );
             }
         }
         // Warm up (fonts/DCs may be cached by GDI on first use).
         for _ in 0..5 {
             for style in IconStyle::ALL {
-                let _ = battery_icon(Some(50), COLOR_NORMAL, style);
-                let _ = battery_icon(Some(15), COLOR_LOW, style);
+                let _ = battery_icon(Some(50), "50", COLOR_NORMAL, style);
+                let _ = battery_icon(Some(15), "15", COLOR_LOW, style);
             }
         }
         let before = gui_counts();
         for i in 0..300u32 {
-            let percent = Some((i % 101) as u8);
+            let percent = (i % 101) as u8;
             let style = IconStyle::ALL[i as usize % 4];
-            let icon = battery_icon(percent, COLOR_LOW, style);
+            let icon = battery_icon(Some(percent), &percent.to_string(), COLOR_LOW, style);
             assert!(!icon.raw().is_null());
             drop(icon);
         }
