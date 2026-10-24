@@ -93,11 +93,7 @@ interfaces whose vendor ID is Pulsar or VAXEE, sends the vendor's battery query,
 and reads the reply. The only thing it ever writes to a mouse is the polling rate you
 pick from the menu. The "Start with Windows" toggle writes one value under
 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, and the **Icon style** choice is
-saved under `HKCU\Software\mousebatt`. Upgrades read the old `BatteryGlyph` value as a
-fallback when `IconStyle` is missing or invalid; the old value is left untouched, and the
-new one is written only when you pick a style. (That means downgrading and upgrading again
-can silently re-apply the pre-downgrade style, and deleting `IconStyle` brings the old
-choice back — both intended.) To match the icon to the taskbar it reads the
+saved under `HKCU\Software\mousebatt`. To match the icon to the taskbar it reads the
 colour of a few taskbar pixels next to the notification area each time it polls the
 mouse; nothing else on screen is read.
 

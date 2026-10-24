@@ -556,9 +556,6 @@ fn style_label(s: IconStyle) -> &'static str {
 
 const SETTINGS_KEY: &str = "Software\\mousebatt";
 const STYLE_VALUE: &str = "IconStyle";
-/// The pre-style-upgrade value, still read as a fallback so an upgrade keeps
-/// the user's old choice.
-const GLYPH_VALUE: &str = "BatteryGlyph";
 /// Used until the user picks another from the menu: the plain number, as
 /// before the glyph existed.
 const DEFAULT_STYLE: IconStyle = IconStyle::Digits;
@@ -577,17 +574,6 @@ fn style_from_dword(value: u32) -> Option<IconStyle> {
     IconStyle::ALL
         .into_iter()
         .find(|&s| style_to_dword(s) == value)
-}
-
-/// The legacy `BatteryGlyph` DWORD mapped onto the styles that existed before
-/// the glyph-only variant: Hidden drew digits alone, Above/Below matched.
-fn glyph_dword_to_style(value: u32) -> Option<IconStyle> {
-    match value {
-        0 => Some(IconStyle::Digits),
-        1 => Some(IconStyle::DigitsGlyphAbove),
-        2 => Some(IconStyle::DigitsGlyphBelow),
-        _ => None,
-    }
 }
 
 /// Read a REG_DWORD value, `None` if absent or not a DWORD.
@@ -610,14 +596,11 @@ fn read_dword(value: &str) -> Option<u32> {
     (rc == 0).then_some(data)
 }
 
-/// The saved icon-style choice, or the default. If the new value is missing
-/// or invalid, the legacy `BatteryGlyph` value is mapped as a fallback; the
-/// legacy key is never written or deleted, and the new key is created only
-/// when the user picks a style from the menu.
+/// The saved icon-style choice, or the default if none (or an unknown one)
+/// is stored.
 fn load_icon_style() -> IconStyle {
     read_dword(STYLE_VALUE)
         .and_then(style_from_dword)
-        .or_else(|| read_dword(GLYPH_VALUE).and_then(glyph_dword_to_style))
         .unwrap_or(DEFAULT_STYLE)
 }
 
@@ -791,15 +774,6 @@ mod tests {
         assert_eq!(stored, [0, 1, 2, 3], "stored values must stay stable");
         assert_eq!(style_from_dword(4), None);
         assert_eq!(style_from_dword(0xFFFF_FFFF), None);
-    }
-
-    #[test]
-    fn legacy_glyph_value_maps_to_style() {
-        assert_eq!(glyph_dword_to_style(0), Some(IconStyle::Digits));
-        assert_eq!(glyph_dword_to_style(1), Some(IconStyle::DigitsGlyphAbove));
-        assert_eq!(glyph_dword_to_style(2), Some(IconStyle::DigitsGlyphBelow));
-        assert_eq!(glyph_dword_to_style(3), None);
-        assert_eq!(glyph_dword_to_style(0xFFFF_FFFF), None);
     }
 
     #[test]
